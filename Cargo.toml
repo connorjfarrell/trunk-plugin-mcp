@@ -1,0 +1,27 @@
+[package]
+name = "mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Lets Claude, or any MCP client, search and read the transcripts of recorded calls, and follow an incident across talkgroups."
+license = "MIT"
+repository = "https://github.com/connorjfarrell/trunk-plugin-mcp"
+authors = ["Connor Farrell <12173192+connorjfarrell@users.noreply.github.com>"]
+publish = false
+
+[dependencies]
+trunk-recorder-plugin = "0.8.0"
+# The settings form is drawn from your config structs' JSON Schema. Keep the
+# major version the SDK uses (1).
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The index: SQLite with full-text search, built in (no system library needed).
+rusqlite = { version = "0.41", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+regex = "1"
+# The server MCP clients connect to.
+tiny_http = "0.12"
+
+[profile.release]
+strip = true
+lto = true
