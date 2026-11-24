@@ -63,7 +63,7 @@ fn world() -> (Arc<Ctx>, PathBuf) {
     );
     let ix = Arc::new(Index::open(&root, &dir.join("data/index.db")).unwrap());
     ix.pass(3, &|_| false, &|| false);
-    let ctx = Arc::new(Ctx { index: ix, settings: RwLock::new(Settings { days: 3, ..Default::default() }) });
+    let ctx = Arc::new(Ctx { index: ix, settings: RwLock::new(Settings { days: 3, audio_max: 1 << 20, ..Default::default() }) });
     (ctx, root)
 }
 
@@ -206,7 +206,7 @@ fn the_protocol_handshake() {
     let (_, out) = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let v: Value = serde_json::from_str(&out.unwrap()).unwrap();
     let names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["recent_activity", "search_traffic", "get_traffic", "incident_context", "list_talkgroups", "get_call", "index_status"]);
+    assert_eq!(names, ["recent_activity", "search_traffic", "get_traffic", "incident_context", "list_talkgroups", "get_call", "get_audio", "index_status"]);
     let (_, out) = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "nonsense" }));
     assert!(out.unwrap().contains("-32601"));
     let (s, _) = mcp::handle(&ctx, b"not json");
@@ -274,4 +274,77 @@ fn settings_are_checked_and_the_plugin_says_what_it_is() {
     assert_eq!(m.subscribe, vec!["call.concluded".to_string()]);
     assert!(m.live_settings);
     assert_eq!(m.id, "mcp");
+}
+
+fn tool_content(ctx: &Ctx, name: &str, args: Value) -> (Vec<Value>, bool) {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
+    let (_, out) = mcp::handle(ctx, body.to_string().as_bytes());
+    let v: Value = serde_json::from_str(&out.unwrap()).unwrap();
+    (v["result"]["content"].as_array().unwrap().clone(), v["result"]["isError"].as_bool().unwrap())
+}
+
+fn id_of(ctx: &Ctx, words: &str) -> i64 {
+    let out = call_tool(ctx, "search_traffic", json!({ "text": words, "since": "1h" }));
+    out.split('[').nth(1).unwrap().split(']').next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn a_recording_comes_back_as_audio() {
+    let (ctx, root) = world();
+    let id = id_of(&ctx, "cardiac arrest");
+    let (c, err) = tool_content(&ctx, "get_audio", json!({ "call_id": id }));
+    assert!(!err && c.len() == 2, "{c:?}");
+    assert!(c[0]["text"].as_str().unwrap().contains("1200 Main Street"));
+    assert_eq!(
+        (c[1]["type"].as_str(), c[1]["mimeType"].as_str(), c[1]["data"].as_str()),
+        (Some("audio"), Some("audio/wav"), Some("UklGRg==")),
+        "the file's bytes"
+    );
+    assert!(call_tool(&ctx, "get_call", json!({ "call_id": id })).contains(&format!("GET /audio/{id}")));
+    // Too big for a reply: pointed at the download instead.
+    ctx.settings.write().unwrap().audio_max = 2;
+    let (c, err) = tool_content(&ctx, "get_audio", json!({ "call_id": id }));
+    assert!(err && c[0]["text"].as_str().unwrap().contains("/audio/"), "{c:?}");
+    ctx.settings.write().unwrap().audio_max = 1 << 20;
+    // A call with its file gone, and one that does not exist.
+    remove_wavs(&root);
+    let (c, err) = tool_content(&ctx, "get_audio", json!({ "call_id": id }));
+    assert!(err && c[0]["text"].as_str().unwrap().contains("no audio"), "{c:?}");
+    assert!(tool_content(&ctx, "get_audio", json!({ "call_id": 987_654 })).1);
+}
+
+fn remove_wavs(dir: &Path) {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        if e.path().is_dir() {
+            remove_wavs(&e.path());
+        } else if e.file_name().to_string_lossy().ends_with(".wav") {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn encrypted_recordings_follow_the_setting_too() {
+    let (ctx, _) = world();
+    set_policy(&ctx, true, &[]);
+    let id = id_of(&ctx, "ten four");
+    assert!(!tool_content(&ctx, "get_audio", json!({ "call_id": id })).1);
+    set_policy(&ctx, false, &[]);
+    assert!(tool_content(&ctx, "get_audio", json!({ "call_id": id })).1, "left out when encrypted calls are");
+}
+
+#[test]
+fn a_recording_downloads_over_http_with_the_token() {
+    let (ctx, _) = world();
+    ctx.settings.write().unwrap().token = "a-long-enough-secret".into();
+    ctx.settings.write().unwrap().allowed = crate::net::parse_list("127.0.0.0/8").unwrap();
+    let id = id_of(&ctx, "cardiac arrest");
+    let server = http::Server::start("127.0.0.1", 0, ctx.clone()).unwrap();
+    let a = server.addr.clone();
+    assert_eq!(http_request(&a, &format!("GET /audio/{id} HTTP/1.1"), "").0, 401);
+    let (s, body) = http_request(&a, &format!("GET /audio/{id}.wav HTTP/1.1\r\nAuthorization: Bearer a-long-enough-secret"), "");
+    assert_eq!((s, body.as_str()), (200, "RIFF"));
+    assert_eq!(http_request(&a, "GET /audio/987654 HTTP/1.1\r\nAuthorization: Bearer a-long-enough-secret", "").0, 404);
+    assert_eq!(http_request(&a, "GET /audio/nope HTTP/1.1\r\nAuthorization: Bearer a-long-enough-secret", "").0, 400);
+    server.stop();
 }

@@ -1,6 +1,6 @@
 [package]
 name = "mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Lets Claude, or any MCP client, search and read the transcripts of recorded calls, and follow an incident across talkgroups."
 license = "MIT"
@@ -19,6 +19,7 @@ serde_json = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = "1"
+base64 = "0.22"
 # The server MCP clients connect to.
 tiny_http = "0.12"
 

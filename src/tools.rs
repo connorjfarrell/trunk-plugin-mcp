@@ -24,6 +24,8 @@ pub struct Settings {
     /// Where the recordings are served (Playback's address), for listen links.
     pub audio_base: String,
     pub days: u32,
+    /// The largest recording `get_audio` hands over in a reply, in bytes.
+    pub audio_max: u64,
     /// The access token a client must send (empty: none).
     pub token: String,
     /// The networks a client may connect from.
@@ -101,12 +103,26 @@ pub fn list() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "get_audio",
+            "description": "A call's recording itself, as an audio file the client receives (WAV, or whatever the recorder saved). Take the id from any other tool's [id]. Recordings larger than the plugin's limit are refused: the same file can be downloaded from `GET /audio/<id>` on this server with the same token.",
+            "inputSchema": { "type": "object", "properties": { "call_id": { "type": "integer" } }, "required": ["call_id"] },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "index_status",
             "description": "How much of the recordings the index has read (the newest days are read first), and what it is set to include.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         }
     ])
+}
+
+/// A tool's answer as MCP content: text, and for `get_audio` the recording too.
+pub fn call_content(ctx: &Ctx, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+    if name == "get_audio" {
+        return get_audio(ctx, args);
+    }
+    call(ctx, name, args).map(|t| vec![json!({ "type": "text", "text": t })])
 }
 
 pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
@@ -381,11 +397,13 @@ fn get_call(ctx: &Ctx, a: &Value) -> Result<String, String> {
         format!("radios: {}", if radios.is_empty() { "unknown".into() } else { radios.join(", ") }),
         format!("transcribed by: {}", if r.server.is_empty() { "not transcribed" } else { &r.server }),
     ];
-    if r.has_audio {
-        out.push(format!("file: {}.wav", ctx.index.root.join(&r.key).display()));
+    if let Some((path, _)) = r.has_audio.then(|| find_audio(&ctx.index.root, &r.key)).flatten() {
+        out.push(format!("file: {}", path.display()));
         if !s.audio_base.is_empty() {
-            out.push(format!("listen: {}/calls/{}.wav", s.audio_base.trim_end_matches('/'), r.key));
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+            out.push(format!("listen: {}/calls/{}.{ext}", s.audio_base.trim_end_matches('/'), r.key));
         }
+        out.push(format!("audio: get_audio tool, or GET /audio/{} on this server", r.id));
     } else {
         out.push("no audio file kept".into());
     }
@@ -410,4 +428,48 @@ fn index_status(ctx: &Ctx) -> Result<String, String> {
         ctx.index.root.display(),
         if st.last_error.is_empty() { String::new() } else { format!("\nProblem: {}", st.last_error) }
     ))
+}
+
+// ── Recordings ──────────────────────────────────────────────────────────────
+
+const AUDIO_TYPES: [(&str, &str); 3] = [("wav", "audio/wav"), ("m4a", "audio/mp4"), ("mp3", "audio/mpeg")];
+
+fn find_audio(root: &std::path::Path, key: &str) -> Option<(std::path::PathBuf, &'static str)> {
+    AUDIO_TYPES.iter().map(|(ext, mime)| (root.join(format!("{key}.{ext}")), *mime)).find(|(p, _)| p.is_file())
+}
+
+pub struct Audio {
+    pub path: std::path::PathBuf,
+    pub mime: &'static str,
+    pub bytes: u64,
+    pub call: Call,
+}
+
+/// The recording of a call, if there is one and the encrypted-calls setting lets it out.
+pub fn audio_file(ctx: &Ctx, id: i64) -> Result<Audio, String> {
+    let conn = ctx.index.reader()?;
+    let s = ctx.settings();
+    let call = queries::get(&conn, id)?.filter(|r| !r.encrypted || allowed(&s.policy, &r.system)).ok_or(format!("No call with id {id}."))?;
+    let (path, mime) = find_audio(&ctx.index.root, &call.key).ok_or(format!("Call {id} has no audio file kept."))?;
+    let bytes = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    Ok(Audio { path, mime, bytes, call })
+}
+
+fn get_audio(ctx: &Ctx, a: &Value) -> Result<Vec<Value>, String> {
+    use base64::Engine;
+    let id = a["call_id"].as_i64().ok_or("`call_id` is the [id] of a call")?;
+    let au = audio_file(ctx, id)?;
+    let s = ctx.settings();
+    if au.bytes > s.audio_max {
+        return Err(format!(
+            "The recording is {} KB, over the {} KB limit for a reply: download it from GET /audio/{id} on this server instead.",
+            au.bytes / 1024,
+            s.audio_max / 1024
+        ));
+    }
+    let data = std::fs::read(&au.path).map_err(|e| format!("can't read the recording: {e}"))?;
+    Ok(vec![
+        json!({ "type": "text", "text": line(&s, &au.call, true, "") }),
+        json!({ "type": "audio", "data": base64::engine::general_purpose::STANDARD.encode(data), "mimeType": au.mime }),
+    ])
 }

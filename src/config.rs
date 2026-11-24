@@ -32,6 +32,11 @@ pub struct Config {
     /// Days to keep in the index
     #[schemars(range(min = 1, max = 365))]
     pub days: u32,
+    /// Largest recording to send in a reply (MB)
+    ///
+    /// `get_audio` hands the assistant a recording only up to this size; a longer one can still be downloaded from `/audio/<call id>` with the token.
+    #[schemars(range(min = 1, max = 100))]
+    pub max_audio_mb: u32,
     /// Radio names
     ///
     /// A file of `radio number,name` lines (the recorder's unit names file), to give radios their names in what the assistant reads.
@@ -51,6 +56,7 @@ impl Default for Config {
             allowed_networks: "127.0.0.0/8".into(),
             include_encrypted: false,
             days: 30,
+            max_audio_mb: 10,
             unit_names_file: String::new(),
             audio_base: String::new(),
         }
@@ -74,6 +80,9 @@ impl Config {
         }
         if !(1..=365).contains(&self.days) {
             return Err("days is 1 to 365".into());
+        }
+        if !(1..=100).contains(&self.max_audio_mb) {
+            return Err("the largest recording is 1 to 100 MB".into());
         }
         if self.bind.trim().is_empty() {
             return Err("say which address to listen on (127.0.0.1 for this machine only)".into());

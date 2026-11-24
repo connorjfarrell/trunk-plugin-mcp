@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server as Tiny};
 
 use crate::mcp;
-use crate::tools::Ctx;
+use crate::tools::{self, Ctx};
 
 const MAX_BODY: u64 = 1 << 20;
 const THREADS: usize = 4;
@@ -74,6 +75,25 @@ fn host_of(v: &str) -> &str {
     v.split('/').next().unwrap_or("")
 }
 
+/// Whether a request is kept out for what it says (another site) or lacks (the token): the answer to give, or none.
+fn gate(req: &Request, token: &str) -> Option<(u16, &'static str, Vec<Header>)> {
+    // A page in a browser can't make a request to this unless it says where it comes from: keep other sites out.
+    let (origin, host) = (get(req, "Origin"), get(req, "Host"));
+    if let (Some(origin), Some(host)) = (&origin, &host)
+        && !host_of(origin).eq_ignore_ascii_case(host_of(host))
+    {
+        return Some((403, r#"{"error":"another site"}"#, vec![]));
+    }
+    if !token.is_empty() {
+        let auth = get(req, "Authorization").unwrap_or_default();
+        let given = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")).unwrap_or("");
+        if !same_secret(given.trim(), token) {
+            return Some((401, r#"{"error":"an access token is needed"}"#, vec![header("WWW-Authenticate", "Bearer")]));
+        }
+    }
+    None
+}
+
 fn serve(ctx: &Ctx, mut req: Request) {
     let (token, allowed) = {
         let s = ctx.settings.read().unwrap();
@@ -98,20 +118,29 @@ fn serve(ctx: &Ctx, mut req: Request) {
         (Method::Get, "/" | "/health") => {
             let _ = req.respond(Response::from_string("ok").with_header(header("Content-Type", "text/plain")));
         }
-        (m, "/mcp") => {
-            // A page in a browser can't make a request to this unless it says where it comes from: keep other sites out.
-            let (origin, host) = (get(&req, "Origin"), get(&req, "Host"));
-            if let (Some(origin), Some(host)) = (&origin, &host)
-                && !host_of(origin).eq_ignore_ascii_case(host_of(host))
-            {
-                return reply(req, 403, r#"{"error":"another site"}"#, vec![]);
+        (Method::Get, p) if p.starts_with("/audio/") => {
+            if let Some((status, body, extra)) = gate(&req, &token) {
+                return reply(req, status, body, extra);
             }
-            if !token.is_empty() {
-                let auth = get(&req, "Authorization").unwrap_or_default();
-                let given = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")).unwrap_or("");
-                if !same_secret(given.trim(), &token) {
-                    return reply(req, 401, r#"{"error":"an access token is needed"}"#, vec![header("WWW-Authenticate", "Bearer")]);
-                }
+            let id = p["/audio/".len()..].split('.').next().and_then(|n| n.parse::<i64>().ok());
+            match id.map(|id| tools::audio_file(ctx, id)) {
+                Some(Ok(a)) => match std::fs::File::open(&a.path) {
+                    Ok(f) => {
+                        let name = a.path.file_name().map(|n| n.to_string_lossy().replace('"', "")).unwrap_or_default();
+                        let r = Response::from_file(f)
+                            .with_header(header("Content-Type", a.mime))
+                            .with_header(header("Content-Disposition", &format!("attachment; filename=\"{name}\"")));
+                        let _ = req.respond(r);
+                    }
+                    Err(_) => reply(req, 404, r#"{"error":"the recording is gone"}"#, vec![]),
+                },
+                Some(Err(e)) => reply(req, 404, &json!({ "error": e }).to_string(), vec![]),
+                None => reply(req, 400, r#"{"error":"GET /audio/<call id>"}"#, vec![]),
+            }
+        }
+        (m, "/mcp") => {
+            if let Some((status, body, extra)) = gate(&req, &token) {
+                return reply(req, status, body, extra);
             }
             if m != Method::Post {
                 return reply(req, 405, r#"{"error":"POST JSON-RPC to /mcp"}"#, vec![header("Allow", "POST")]);
