@@ -56,6 +56,7 @@ fn settings_of(setup: &Setup<Config, SystemConfig>) -> (Settings, HashSet<String
         units: load_units(&c.unit_names_file),
         audio_base: c.audio_base.trim().to_string(),
         days: c.days,
+        audio_max: u64::from(c.max_audio_mb) << 20,
         token: c.token.trim().to_string(),
         allowed: net::parse_list(&c.allowed_networks).unwrap_or_default(),
     };

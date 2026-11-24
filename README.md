@@ -17,7 +17,17 @@ data folder, and serves MCP over HTTP at `http://host:port/mcp`. It only reads: 
 | `incident_context` | the traffic around one call: its talkgroup, and other talkgroups linked to it by the radios that answered it, and by the units and numbers its dispatch named |
 | `list_talkgroups` | which talkgroups were active, with their numbers |
 | `get_call` | one call in full, and where its audio is |
+| `get_audio` | a call's recording itself, handed to the client as an audio file |
 | `index_status` | how much has been read |
+
+Recordings can also be downloaded directly, with the same token and network rules as the tools:
+
+```sh
+curl -H "Authorization: Bearer YOUR-TOKEN" -o call.wav http://127.0.0.1:8770/audio/CALL-ID
+```
+
+`get_audio` sends a recording up to **Largest recording to send in a reply** (10 MB by default; a call is usually well under 1 MB); a longer one is
+refused with a pointer to `/audio/<id>`, which has no limit. Encrypted calls' recordings follow the same **Include encrypted calls** setting as their transcripts.
 
 Times are your local time: `30m`, `2h ago`, `10:30`, `yesterday 22:30`, `2026-11-05 10:30`.
 

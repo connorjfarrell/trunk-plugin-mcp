@@ -48,13 +48,13 @@ fn one(ctx: &Ctx, m: &Value) -> Option<Value> {
             if name.is_empty() {
                 return Some(error(id, -32602, "a tool call needs a name"));
             }
-            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools::call(ctx, name, &args)));
-            let (text, is_error) = match run {
-                Ok(Ok(t)) => (t, false),
-                Ok(Err(e)) => (e, true),
-                Err(_) => ("the tool failed".to_string(), true),
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools::call_content(ctx, name, &args)));
+            let (content, is_error) = match run {
+                Ok(Ok(c)) => (c, false),
+                Ok(Err(e)) => (vec![json!({ "type": "text", "text": e })], true),
+                Err(_) => (vec![json!({ "type": "text", "text": "the tool failed" })], true),
             };
-            result(id, json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
+            result(id, json!({ "content": content, "isError": is_error }))
         }
         "resources/list" => result(id, json!({ "resources": [] })),
         "prompts/list" => result(id, json!({ "prompts": [] })),
